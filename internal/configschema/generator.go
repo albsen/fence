@@ -48,6 +48,11 @@ func Generate() ([]byte, error) {
 }
 
 func schemaForType(t reflect.Type) (map[string]any, error) {
+	// config.Duration is an int64-based named type that marshals to a JSON
+	// string (a Go duration like "30s"), so the schema must say string.
+	if t == reflect.TypeOf(config.Duration(0)) {
+		return map[string]any{"type": "string"}, nil
+	}
 	switch t.Kind() {
 	case reflect.Pointer:
 		inner, err := schemaForType(t.Elem())

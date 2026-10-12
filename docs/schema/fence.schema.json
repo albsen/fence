@@ -217,11 +217,7 @@
           "type": "array"
         },
         "defaultAction": {
-          "description": "Action for traffic not matched by allowedDomains or deniedDomains. Allowed values: \"deny\" (default), \"proxy\" (requires upstreamProxy).",
-          "enum": [
-            "deny",
-            "proxy"
-          ],
+          "description": "Action for traffic not matched by allowedDomains or deniedDomains. Allowed values: \"deny\" (default), \"proxy\" (requires upstreamProxy).\" schema:\"enum=deny|proxy\"",
           "type": "string"
         },
         "deniedDomains": {
@@ -234,6 +230,13 @@
         "httpProxyPort": {
           "description": "Port for the internal HTTP proxy used to enforce domain filtering. Set automatically by fence; only override for advanced configurations.",
           "type": "integer"
+        },
+        "httpTimeout": {
+          "description": "Total wall-clock time allowed for a non-streaming HTTP request made by fence's internal proxy. Streaming (Server-Sent Events) responses are exempt and may run for as long as the connection stays healthy. Format is a Go duration string: \"30s\", \"2m\", \"1500ms\". The default (omitted) allows 60s for ordinary requests. Set to \"0s\" to disable the total-request timeout. Connection establishment and response-header waits are bounded separately and are always enforced.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "socksProxyPort": {
           "description": "Port for the internal SOCKS proxy used to enforce domain filtering. Set automatically by fence; only override for advanced configurations.",

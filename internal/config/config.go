@@ -2,6 +2,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/tidwall/jsonc"
 )
@@ -39,6 +41,58 @@ const (
 	DefaultActionProxy DefaultActionType = "proxy"
 )
 
+// Duration is a Go time.Duration rendered to and from JSON as a Go duration
+// string (e.g. "30s", "2m", "1500ms"). Using a string (rather than a raw
+// nanosecond integer) keeps hand-edited config files human-friendly. A nil
+// pointer means "unset"; use an Effective* accessor to obtain the applied
+// default.
+type Duration time.Duration
+
+// String renders the duration as a Go duration string.
+func (d Duration) String() string {
+	return time.Duration(d).String()
+}
+
+// MarshalJSON renders the duration as a JSON string.
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return []byte(`"` + time.Duration(d).String() + `"`), nil
+}
+
+// UnmarshalJSON parses a JSON string into a Go duration.
+func (d *Duration) UnmarshalJSON(data []byte) error {
+	s, err := unquoteJSONString(data)
+	if err != nil {
+		return fmt.Errorf("config duration: %w", err)
+	}
+	parsed, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("config duration %q: %w", s, err)
+	}
+	*d = Duration(parsed)
+	return nil
+}
+
+// unquoteJSONString decodes a JSON string literal (or null) into a Go string.
+func unquoteJSONString(data []byte) (string, error) {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return "", fmt.Errorf("empty duration")
+	}
+	if string(trimmed) == "null" {
+		return "", nil
+	}
+	var s string
+	if err := json.Unmarshal(trimmed, &s); err != nil {
+		return "", err
+	}
+	return s, nil
+}
+
+// DefaultHTTPTimeout is the default total-request timeout for non-streaming
+// HTTP requests made by fence's internal proxy. Streaming (SSE) responses are
+// exempt from this limit entirely.
+const DefaultHTTPTimeout = 60 * time.Second
+
 // NetworkConfig defines network restrictions.
 type NetworkConfig struct {
 	AllowedDomains      []string `json:"allowedDomains" description:"Domains the sandbox may connect to. Supports wildcards (e.g. *.example.com). Use \"*\" to allow all outbound connections. If empty, all outbound connections are blocked."`
@@ -56,7 +110,8 @@ type NetworkConfig struct {
 	HTTPProxyPort           int               `json:"httpProxyPort,omitempty" description:"Port for the internal HTTP proxy used to enforce domain filtering. Set automatically by fence; only override for advanced configurations."`
 	SOCKSProxyPort          int               `json:"socksProxyPort,omitempty" description:"Port for the internal SOCKS proxy used to enforce domain filtering. Set automatically by fence; only override for advanced configurations."`
 	UpstreamProxy           string            `json:"upstreamProxy,omitempty" description:"Optional upstream HTTP proxy URL (e.g. http://127.0.0.1:8080). When set, grey-zone traffic (not matched by allowedDomains, not hard-blocked by deniedDomains) is forwarded to this proxy instead of being denied. Intended for use with tools like mitmproxy for interactive inspection."`
-	DefaultAction           DefaultActionType `json:"defaultAction,omitempty" description:"Action for traffic not matched by allowedDomains or deniedDomains. Allowed values: \"deny\" (default), \"proxy\" (requires upstreamProxy)." schema:"enum=deny|proxy"`
+	DefaultAction           DefaultActionType `json:"defaultAction,omitempty" description:"Action for traffic not matched by allowedDomains or deniedDomains. Allowed values: \"deny\" (default), \"proxy\" (requires upstreamProxy).\" schema:\"enum=deny|proxy\""`
+	HTTPTimeout             *Duration         `json:"httpTimeout,omitempty" description:"Total wall-clock time allowed for a non-streaming HTTP request made by fence's internal proxy. Streaming (Server-Sent Events) responses are exempt and may run for as long as the connection stays healthy. Format is a Go duration string: \"30s\", \"2m\", \"1500ms\". The default (omitted) allows 60s for ordinary requests. Set to \"0s\" to disable the total-request timeout. Connection establishment and response-header waits are bounded separately and are always enforced."`
 }
 
 // EffectiveAllowLocalOutbound returns whether outbound connections to
@@ -68,6 +123,21 @@ func (n NetworkConfig) EffectiveAllowLocalOutbound() bool {
 		return *n.AllowLocalOutbound
 	}
 	return n.AllowLocalBinding
+}
+
+// EffectiveHTTPTimeout returns the total-request timeout that fence's internal
+// HTTP proxy applies to non-streaming requests.
+//
+//   - nil (field omitted) → DefaultHTTPTimeout
+//   - "0s" (explicit)     → 0 (total-request timeout disabled)
+//   - other positive value → that value
+//
+// Streaming (SSE) responses are exempt from this limit regardless of its value.
+func (n NetworkConfig) EffectiveHTTPTimeout() time.Duration {
+	if n.HTTPTimeout == nil {
+		return DefaultHTTPTimeout
+	}
+	return time.Duration(*n.HTTPTimeout)
 }
 
 // DeviceMode controls how /dev is set up inside Linux sandboxes.

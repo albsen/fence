@@ -226,6 +226,9 @@ func (m *Manager) Initialize() error {
 	route := proxy.CreateRouteFunc(m.config, m.debug)
 	upstreamURL := proxy.ParseUpstreamProxyURL(m.config)
 	m.httpProxy = proxy.NewHTTPProxy(route, upstreamURL, m.debug, m.monitor)
+	// Apply the configured total-request timeout for non-streaming responses.
+	// Streaming (SSE) responses are never limited by this value.
+	m.httpProxy.SetRequestTimeout(m.config.Network.EffectiveHTTPTimeout())
 	httpPort, err := m.httpProxy.Start()
 	if err != nil {
 		return fmt.Errorf("failed to start HTTP proxy: %w", err)

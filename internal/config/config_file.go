@@ -27,6 +27,7 @@ type cleanNetworkConfig struct {
 	SOCKSProxyPort          int               `json:"socksProxyPort,omitempty"`
 	UpstreamProxy           string            `json:"upstreamProxy,omitempty"`
 	DefaultAction           DefaultActionType `json:"defaultAction,omitempty"`
+	HTTPTimeout             *Duration         `json:"httpTimeout,omitempty"`
 }
 
 // cleanFilesystemConfig is used for JSON output with omitempty to skip empty fields.
@@ -114,6 +115,8 @@ func MarshalConfigJSON(cfg *Config) ([]byte, error) {
 		UpstreamProxy:           cfg.Network.UpstreamProxy,
 		// DefaultActionDeny is the implicit default; omit it so configs stay minimal.
 		DefaultAction: serializeDefaultAction(cfg.Network.DefaultAction),
+		// HTTPTimeout: emit only when explicitly set (nil means "use default").
+		HTTPTimeout: cfg.Network.HTTPTimeout,
 	}
 	if !isNetworkEmpty(network) {
 		clean.Network = &network
@@ -194,7 +197,8 @@ func isNetworkEmpty(n cleanNetworkConfig) bool {
 		n.HTTPProxyPort == 0 &&
 		n.SOCKSProxyPort == 0 &&
 		n.UpstreamProxy == "" &&
-		n.DefaultAction == ""
+		n.DefaultAction == "" &&
+		n.HTTPTimeout == nil
 }
 
 func isFilesystemEmpty(f cleanFilesystemConfig) bool {

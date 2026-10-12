@@ -161,6 +161,7 @@ See [templates.md](templates.md) for available templates.
 | `socksProxyPort` | Fixed port for SOCKS5 proxy (default: random available port) |
 | `upstreamProxy` | Optional upstream HTTP proxy URL (e.g. `http://127.0.0.1:8080`). Used with `defaultAction: "proxy"` to forward grey-zone traffic for inspection. Only `http://` scheme is supported. See [Upstream Proxy / mitmproxy](#upstream-proxy--mitmproxy). |
 | `defaultAction` | What to do with traffic that matches neither `allowedDomains` nor `deniedDomains`. `"deny"` (default): block it. `"proxy"`: forward to `upstreamProxy` (requires `upstreamProxy`). |
+| `httpTimeout` | Total wall-clock time allowed for a **non-streaming** HTTP request made by fence's internal proxy. Format is a Go duration string: `"30s"`, `"2m"`, `"1500ms"`. Default `60s` when omitted. Set to `"0s"` to disable the total-request timeout for ordinary requests. **Streaming (Server-Sent Events) responses are exempt** and run as long as the connection stays healthy, so long LLM generations are not cut off. Connection establishment (10s) and the response-header wait (60s) are bounded separately and always apply. |
 
 ### Upstream Proxy / mitmproxy
 

@@ -40,6 +40,18 @@ const (
 	RouteDecisionUpstream
 )
 
+var (
+	// dialTimeout bounds how long we wait to establish a TCP connection to a
+	// target (direct) or to the upstream proxy.
+	dialTimeout = 10 * time.Second
+
+	// responseHeaderTimeout bounds how long we wait for the upstream to send
+	// response headers after the request is written. It guards against an
+	// upstream that accepts the connection but never responds. It does NOT
+	// limit the response body, so streaming (SSE) responses are unaffected.
+	responseHeaderTimeout = 60 * time.Second
+)
+
 // RouteFunc maps a host:port to a RouteDecision.
 type RouteFunc func(host string, port int) RouteDecision
 
@@ -55,23 +67,63 @@ type HTTPProxy struct {
 	monitor        bool
 	mu             sync.RWMutex
 	running        bool
+	// requestTimeout is the total-request timeout applied to non-streaming
+	// responses. It is 0 (unlimited) for streaming (SSE) responses.
+	requestTimeout time.Duration
 }
 
+// defaultRequestTimeout is the total-request timeout for non-streaming
+// responses when the configuration does not specify one.
+const defaultRequestTimeout = config.DefaultHTTPTimeout
+
 // NewHTTPProxy creates a new HTTP proxy with the given route function.
-// upstreamURL may be nil when no upstream proxy is configured.
+// upstreamURL may be nil when no upstream is configured.
 // If monitor is true, only blocked requests are logged.
 // If debug is true, all requests and filter rules are logged.
+//
+// The total-request timeout for non-streaming responses defaults to
+// config.DefaultHTTPTimeout; call SetRequestTimeout to override it. Streaming
+// (SSE) responses are never subject to a total-request timeout.
 func NewHTTPProxy(route RouteFunc, upstreamURL *url.URL, debug, monitor bool) *HTTPProxy {
+	return newHTTPProxy(route, upstreamURL, defaultRequestTimeout, debug, monitor)
+}
+
+// SetRequestTimeout sets the total-request timeout for non-streaming
+// responses. A value of 0 disables the total-request timeout for ordinary
+// requests. It has no effect on streaming (SSE) responses, which are always
+// allowed to run until the stream ends or the caller cancels.
+func (p *HTTPProxy) SetRequestTimeout(d time.Duration) {
+	p.requestTimeout = d
+}
+
+// newHTTPProxy is the full constructor. requestTimeout is the total-request
+// timeout applied to non-streaming responses (0 disables it). It is never
+// applied to streaming (SSE) responses.
+func newHTTPProxy(route RouteFunc, upstreamURL *url.URL, requestTimeout time.Duration, debug, monitor bool) *HTTPProxy {
 	noRedirect := func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
-	directTransport := &http.Transport{}
-	directClient := &http.Client{Transport: directTransport, Timeout: 30 * time.Second, CheckRedirect: noRedirect}
+
+	// No http.Client.Timeout is set: a client-level timeout counts the entire
+	// response body and would cut off otherwise-healthy streaming (SSE)
+	// responses. Instead, connection establishment (DialContext) and the
+	// response-header wait (ResponseHeaderTimeout) are bounded below, and the
+	// total-request limit for non-streaming bodies is enforced in handleHTTP.
+	dialer := &net.Dialer{Timeout: dialTimeout}
+	directTransport := &http.Transport{
+		DialContext:           dialer.DialContext,
+		ResponseHeaderTimeout: responseHeaderTimeout,
+	}
+	directClient := &http.Client{Transport: directTransport, CheckRedirect: noRedirect}
 
 	var upstreamClient *http.Client
 	if upstreamURL != nil {
-		upstreamTransport := &http.Transport{Proxy: http.ProxyURL(upstreamURL)}
-		upstreamClient = &http.Client{Transport: upstreamTransport, Timeout: 30 * time.Second, CheckRedirect: noRedirect}
+		upstreamTransport := &http.Transport{
+			Proxy:                 http.ProxyURL(upstreamURL),
+			DialContext:           dialer.DialContext,
+			ResponseHeaderTimeout: responseHeaderTimeout,
+		}
+		upstreamClient = &http.Client{Transport: upstreamTransport, CheckRedirect: noRedirect}
 	}
 
 	return &HTTPProxy{
@@ -81,6 +133,7 @@ func NewHTTPProxy(route RouteFunc, upstreamURL *url.URL, debug, monitor bool) *H
 		upstreamClient: upstreamClient,
 		debug:          debug,
 		monitor:        monitor,
+		requestTimeout: requestTimeout,
 	}
 }
 
@@ -413,6 +466,21 @@ func (p *HTTPProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		client = p.upstreamClient
 	}
 
+	// Attach the total-request deadline to the request context so it bounds
+	// the whole request lifecycle, including the response-body read. It does
+	// not apply to streaming (SSE) responses, which must run for as long as
+	// the stream is healthy: the deadline is left unset for those. The context
+	// still inherits r.Context(), so caller cancellation always aborts the
+	// request and the in-flight body read.
+	ctx := r.Context()
+	streaming := isStreamingRequest(r)
+	if !streaming && p.requestTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, p.requestTimeout)
+		defer cancel()
+	}
+	proxyReq = proxyReq.WithContext(ctx)
+
 	resp, err := client.Do(proxyReq) // #nosec G704 - validated by route() allowlist
 	if err != nil {
 		action := "ERROR"
@@ -431,6 +499,11 @@ func (p *HTTPProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
+
+	// For streaming responses the context has no deadline, so this copy runs
+	// until the upstream closes the stream, the caller cancels, or the
+	// connection drops. For non-streaming responses the bounded context aborts
+	// the body read once the total-request timeout elapses.
 	_, _ = io.Copy(w, resp.Body)
 
 	action := "ALLOWED"
@@ -479,6 +552,17 @@ func truncateURL(url string, maxLen int) string {
 		return url
 	}
 	return url[:maxLen-3] + "..."
+}
+
+// isStreamingRequest reports whether the caller asked for a streaming
+// (Server-Sent Events) response. OpenAI-compatible clients — including the
+// agents this sandbox runs — signal streaming with "Accept: text/event-stream"
+// (alongside "stream": true in the JSON body). We use the header because it is
+// available before the request is sent and is the standard SSE content
+// negotiation. Streaming requests are exempt from the total-request timeout so
+// long generations are not cut off.
+func isStreamingRequest(r *http.Request) bool {
+	return strings.Contains(r.Header.Get("Accept"), "text/event-stream")
 }
 
 // CreateDomainFilter creates a boolean FilterFunc from a config.
